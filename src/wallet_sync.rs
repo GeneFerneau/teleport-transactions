@@ -25,10 +25,11 @@ use bitcoin::{
         hash160::Hash as Hash160,
         hex::{FromHex, ToHex},
     },
+    schnorr,
     secp256k1,
     secp256k1::{Secp256k1, SecretKey, Signature},
     util::{
-        bip143::SigHashCache,
+        sighash::SigHashCache,
         bip32::{ChildNumber, DerivationPath, ExtendedPrivKey, ExtendedPubKey},
         key::PublicKey,
         psbt::serialize::Serialize,
@@ -100,6 +101,7 @@ const WATCH_ONLY_SWAPCOIN_LABEL: &str = "watchonly_swapcoin_label";
 pub struct IncomingSwapCoin {
     pub my_privkey: SecretKey,
     pub other_pubkey: PublicKey,
+    pub pointlock_pubkey: Option<schnorr::PublicKey>,
     pub other_privkey: Option<SecretKey>,
     pub contract_tx: Transaction,
     pub contract_redeemscript: Script,
@@ -107,6 +109,7 @@ pub struct IncomingSwapCoin {
     pub funding_amount: u64,
     pub others_contract_sig: Option<Signature>,
     pub hash_preimage: Option<Preimage>,
+    pub adaptor: Option<SecretKey>,
 }
 
 //swapcoins are UTXOs + metadata which are not from the deterministic wallet
@@ -115,12 +118,14 @@ pub struct IncomingSwapCoin {
 pub struct OutgoingSwapCoin {
     pub my_privkey: SecretKey,
     pub other_pubkey: PublicKey,
+    pub pointlock_pubkey: Option<schnorr::PublicKey>,
     pub contract_tx: Transaction,
     pub contract_redeemscript: Script,
     pub timelock_privkey: SecretKey,
     pub funding_amount: u64,
     pub others_contract_sig: Option<Signature>,
     pub hash_preimage: Option<Preimage>,
+    pub adaptor: Option<SecretKey>,
 }
 
 impl IncomingSwapCoin {
@@ -144,6 +149,7 @@ impl IncomingSwapCoin {
         Self {
             my_privkey,
             other_pubkey,
+            pointlock_pubkey: None,
             other_privkey: None,
             contract_tx,
             contract_redeemscript,
@@ -151,6 +157,7 @@ impl IncomingSwapCoin {
             funding_amount,
             others_contract_sig: None,
             hash_preimage: None,
+            adaptor: None,
         }
     }
 
@@ -168,12 +175,12 @@ impl IncomingSwapCoin {
         let my_pubkey = self.get_my_pubkey();
 
         let sighash = secp256k1::Message::from_slice(
-            &SigHashCache::new(tx).signature_hash(
+            &SigHashCache::new(tx).segwit_signature_hash(
                 index,
                 redeemscript,
                 self.funding_amount,
                 SigHashType::All,
-            )[..],
+            ).map_err(|_| "unable to calculate segwit signature hash")?[..],
         )
         .unwrap();
 
@@ -213,12 +220,14 @@ impl OutgoingSwapCoin {
         Self {
             my_privkey,
             other_pubkey,
+            pointlock_pubkey: None,
             contract_tx,
             contract_redeemscript,
             timelock_privkey,
             funding_amount,
             others_contract_sig: None,
             hash_preimage: None,
+            adaptor: None,
         }
     }
 
@@ -257,6 +266,7 @@ impl OutgoingSwapCoin {
 pub trait WalletSwapCoin {
     fn get_my_pubkey(&self) -> PublicKey;
     fn get_other_pubkey(&self) -> &PublicKey;
+    fn get_pointlock_pubkey(&self) -> Option<&schnorr::PublicKey>;
 }
 
 impl WalletSwapCoin for IncomingSwapCoin {
@@ -271,6 +281,10 @@ impl WalletSwapCoin for IncomingSwapCoin {
     fn get_other_pubkey(&self) -> &PublicKey {
         &self.other_pubkey
     }
+
+    fn get_pointlock_pubkey(&self) -> Option<&schnorr::PublicKey> {
+        self.pointlock_pubkey.as_ref()
+    }
 }
 
 impl WalletSwapCoin for OutgoingSwapCoin {
@@ -284,6 +298,10 @@ impl WalletSwapCoin for OutgoingSwapCoin {
 
     fn get_other_pubkey(&self) -> &PublicKey {
         &self.other_pubkey
+    }
+
+    fn get_pointlock_pubkey(&self) -> Option<&schnorr::PublicKey> {
+        self.pointlock_pubkey.as_ref()
     }
 }
 
@@ -1049,12 +1067,15 @@ impl Wallet {
                 let input_value =
                     convert_json_rpc_bitcoin_to_satoshis(&input_info["witness_utxo"]["amount"]);
                 let scriptcode = Script::new_p2pkh(&pubkey.pubkey_hash());
-                let sighash = SigHashCache::new(&tx_clone).signature_hash(
+                let sighash = match SigHashCache::new(&tx_clone).segwit_signature_hash(
                     ix,
                     &scriptcode,
                     input_value,
                     SigHashType::All,
-                );
+                ) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
                 //TODO use low-R value signatures for privacy
                 //https://en.bitcoin.it/wiki/Privacy#Wallet_fingerprinting
                 let signature = secp.sign(

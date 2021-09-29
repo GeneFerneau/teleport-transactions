@@ -11,7 +11,7 @@ use bitcoin::{
     hashes::{hash160::Hash as Hash160, Hash},
     secp256k1,
     secp256k1::{Message, Secp256k1, SecretKey, Signature},
-    util::bip143::SigHashCache,
+    util::sighash::SigHashCache,
     util::key::PublicKey,
     Address, OutPoint, SigHashType, Transaction, TxIn, TxOut,
 };
@@ -426,12 +426,12 @@ pub fn sign_contract_tx(
 ) -> Result<Signature, secp256k1::Error> {
     let input_index = 0;
     let sighash = Message::from_slice(
-        &SigHashCache::new(contract_tx).signature_hash(
+        &SigHashCache::new(contract_tx).segwit_signature_hash(
             input_index,
             multisig_redeemscript,
             funding_amount,
             SigHashType::All,
-        )[..],
+        ).map_err(|_| secp256k1::Error::InvalidSignature)?[..],
     )?;
     let secp = Secp256k1::new();
     Ok(secp.sign(&sighash, privkey))
@@ -445,14 +445,16 @@ fn verify_contract_tx_sig(
     sig: &Signature,
 ) -> bool {
     let input_index = 0;
-    let sighash = match Message::from_slice(
-        &SigHashCache::new(contract_tx).signature_hash(
+    let sighash = match SigHashCache::new(contract_tx).segwit_signature_hash(
             input_index,
             multisig_redeemscript,
             funding_amount,
             SigHashType::All,
-        )[..],
-    ) {
+        ) {
+            Ok(s) => s,
+            Err(_) => return false,
+    };
+    let sighash = match Message::from_slice(&sighash[..]) {
         Ok(sig) => sig,
         Err(_) => return false,
     };
@@ -965,7 +967,7 @@ mod test {
         let funding_outpoint_script =
             crate::wallet_sync::create_multisig_redeemscript(&pub1, &pub2);
 
-        let funding_spk = Address::p2sh(&funding_outpoint_script, NETWORK).script_pubkey();
+        let funding_spk = Address::p2sh(&funding_outpoint_script, NETWORK).unwrap().script_pubkey();
 
         let funding_tx = Transaction {
             input: vec![TxIn {
