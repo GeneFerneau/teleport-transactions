@@ -8,10 +8,12 @@ use bitcoin::{
         opcodes,
         script::{Builder, Instruction, Script},
     },
-    hashes::{hash160::Hash as Hash160, Hash},
+    hashes::{hash160::Hash as Hash160, Hash, HashEngine, sha256t::Tag},
+    schnorr,
     secp256k1,
     secp256k1::{Message, Secp256k1, SecretKey, Signature},
     util::sighash::SigHashCache,
+    util::taproot::{TaprootKey, TapBranchHash, TapBranchTag, TapLeafHash, TapLeafTag},
     util::key::PublicKey,
     Address, OutPoint, SigHashType, Transaction, TxIn, TxOut,
 };
@@ -38,6 +40,7 @@ pub const REFUND_LOCKTIME_STEP: u16 = 5; //in blocks
 pub struct WatchOnlySwapCoin {
     pub sender_pubkey: PublicKey,
     pub receiver_pubkey: PublicKey,
+    pub pointlock_pubkey: Option<schnorr::PublicKey>,
     pub contract_tx: Transaction,
     pub contract_redeemscript: Script,
     pub funding_amount: u64,
@@ -45,8 +48,10 @@ pub struct WatchOnlySwapCoin {
 
 pub trait SwapCoin {
     fn get_multisig_redeemscript(&self) -> Script;
+    //fn get_tapscript_redeemscript(&self) -> Script;
     fn get_contract_tx(&self) -> Transaction;
     fn get_contract_redeemscript(&self) -> Script;
+    fn get_pointlock_redeemscript(&self) -> Result<Script, Error>;
     fn get_funding_amount(&self) -> u64;
     fn verify_contract_tx_receiver_sig(&self, sig: &Signature) -> bool;
     fn verify_contract_tx_sender_sig(&self, sig: &Signature) -> bool;
@@ -105,6 +110,76 @@ pub fn create_contract_redeemscript(
         .push_opcode(opcodes::all::OP_ROT)
         .push_opcode(opcodes::all::OP_EQUALVERIFY)
         .push_opcode(opcodes::all::OP_CHECKSIG)
+        .into_script()
+}
+
+#[rustfmt::skip]
+pub fn create_pointlock_redeemscript(pub_pointlock: &schnorr::PublicKey) -> Script {
+    let secp = Secp256k1::new();
+    Script::new_v1_p2tr(&secp, pub_pointlock.clone())
+}
+
+#[rustfmt::skip]
+pub fn create_tapscript_redeemscript(pub_internal: &schnorr::PublicKey, pub_timelock: &schnorr::PublicKey, locktime: u16) -> Script {
+    let secp = Secp256k1::new();
+    // TODO calculate full TapScript output script 
+    //
+    //  script = Serialize(PUSH_TAPSCRIPT_PUBKEY(timelock_key) | PUSH_INT(locktime) | PUSH_OPCODE(OP_CSV) | PUSH_OPCODE(OP_CHECKSIG))
+    //
+    //  TapTree:
+    //
+    //  S = TapTweakHash(internal_pubkey, tap_branch)
+    //       |
+    //  tap_branch = TapBranch(tap_leaf, unspendable)
+    //       |
+    //       |------------------------------------------------------|
+    //       v                                                      v
+    //  tap_leaf = TapLeafHash(leaf_version, script)              unspendable_leaf
+    //
+    //  output_pubkey = TapTweakPubkey(internal_pubkey, tap_leaf)
+    //
+    //  <output_pubkey> <script> <control_block: <version+parity> <internal_pubkey>>
+
+    // this is the actual Script that gets executed
+    let script = Builder::new()
+        .push_slice(&pub_timelock.serialize())
+        .push_int(locktime as i64)
+        .push_opcode(opcodes::all::OP_CSV)
+        .push_opcode(opcodes::all::OP_CHECKSIG)
+        .into_script()
+        .into_bytes();
+    let leaf_version = 0x51u8;
+    let _wit_size = 0x20u8;
+    let script_size = script.len() as u8;
+    let mut tap_leaf_engine = TapLeafTag::engine();
+    tap_leaf_engine.input(&[leaf_version, script_size]);
+    tap_leaf_engine.input(script.as_slice());
+    let tap_leaf = TapLeafHash::from_engine(tap_leaf_engine);
+
+    let unspendable = TapLeafHash::hash(secp256k1::constants::GENERATOR_X.as_ref());
+
+    let mut tap_branch_engine = TapBranchTag::engine();
+    if tap_leaf < unspendable {
+        tap_branch_engine.input(tap_leaf.as_inner());
+        tap_branch_engine.input(unspendable.as_inner());
+    } else {
+        tap_branch_engine.input(unspendable.as_inner());
+        tap_branch_engine.input(tap_leaf.as_inner());
+    }
+    let tap_branch = TapBranchHash::from_engine(tap_branch_engine);
+
+    let mut output_key = pub_internal.clone();
+    output_key.script_tweak(&secp, tap_branch);
+
+    let mut control_block = [0u8; 33];
+    control_block[0] = leaf_version/* | parity*/;
+    control_block[1..].copy_from_slice(pub_internal.serialize().as_ref());
+
+    Builder::new()
+        // TODO: switch to push_key after Builder refactor
+        .push_slice(output_key.serialize().as_ref())
+        .push_slice(script.as_ref())
+        .push_slice(control_block.as_ref())
         .into_script()
 }
 
@@ -478,6 +553,11 @@ impl SwapCoin for IncomingSwapCoin {
         self.contract_tx.clone()
     }
 
+    fn get_pointlock_redeemscript(&self) -> Result<Script, Error> {
+        let pointlock_key = self.pointlock_pubkey.as_ref().ok_or(Error::Protocol("missing pointlock public key"))?;
+        Ok(create_pointlock_redeemscript(pointlock_key))
+    }
+
     fn get_contract_redeemscript(&self) -> Script {
         self.contract_redeemscript.clone()
     }
@@ -526,6 +606,11 @@ impl SwapCoin for OutgoingSwapCoin {
 
     fn get_contract_tx(&self) -> Transaction {
         self.contract_tx.clone()
+    }
+
+    fn get_pointlock_redeemscript(&self) -> Result<Script, Error> {
+        let pointlock_key = self.pointlock_pubkey.as_ref().ok_or(Error::Protocol("missing pointlock public key"))?;
+        Ok(create_pointlock_redeemscript(pointlock_key))
     }
 
     fn get_contract_redeemscript(&self) -> Script {
@@ -599,6 +684,11 @@ sign_and_verify_contract!(OutgoingSwapCoin);
 impl SwapCoin for WatchOnlySwapCoin {
     fn get_multisig_redeemscript(&self) -> Script {
         create_multisig_redeemscript(&self.sender_pubkey, &self.receiver_pubkey)
+    }
+
+    fn get_pointlock_redeemscript(&self) -> Result<Script, Error> {
+        let pointlock_key = self.pointlock_pubkey.as_ref().ok_or(Error::Protocol("missing pointlock public key"))?;
+        Ok(create_pointlock_redeemscript(pointlock_key))
     }
 
     fn get_contract_tx(&self) -> Transaction {
@@ -680,6 +770,7 @@ impl WatchOnlySwapCoin {
             contract_tx,
             contract_redeemscript,
             funding_amount,
+            pointlock_pubkey: None,
         })
     }
 }
