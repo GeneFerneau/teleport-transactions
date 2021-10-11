@@ -109,6 +109,7 @@ pub struct IncomingSwapCoin {
     pub funding_amount: u64,
     pub others_contract_sig: Option<Signature>,
     pub hash_preimage: Option<Preimage>,
+    pub pointlock_presig: Option<Signature>,
     pub adaptor: Option<SecretKey>,
 }
 
@@ -125,6 +126,7 @@ pub struct OutgoingSwapCoin {
     pub funding_amount: u64,
     pub others_contract_sig: Option<Signature>,
     pub hash_preimage: Option<Preimage>,
+    pub pointlock_presig: Option<Signature>,
     pub adaptor: Option<SecretKey>,
 }
 
@@ -157,6 +159,7 @@ impl IncomingSwapCoin {
             funding_amount,
             others_contract_sig: None,
             hash_preimage: None,
+            pointlock_presig: None,
             adaptor: None,
         }
     }
@@ -227,6 +230,7 @@ impl OutgoingSwapCoin {
             funding_amount,
             others_contract_sig: None,
             hash_preimage: None,
+            pointlock_presig: None,
             adaptor: None,
         }
     }
@@ -240,12 +244,12 @@ impl OutgoingSwapCoin {
         let index = 0;
         let secp = Secp256k1::new();
         let sighash = secp256k1::Message::from_slice(
-            &SigHashCache::new(&self.contract_tx).signature_hash(
+            &SigHashCache::new(&self.contract_tx).segwit_signature_hash(
                 index,
                 &multisig_redeemscript,
                 self.funding_amount,
                 SigHashType::All,
-            )[..],
+            ).expect("invalid input to SegWit signature hash")[..],
         )
         .unwrap();
         let sig_mine = secp.sign(&sighash, &self.my_privkey);
@@ -267,6 +271,7 @@ pub trait WalletSwapCoin {
     fn get_my_pubkey(&self) -> PublicKey;
     fn get_other_pubkey(&self) -> &PublicKey;
     fn get_pointlock_pubkey(&self) -> Option<&schnorr::PublicKey>;
+    fn recover_pointlock_secret(&mut self, adaptor_sig: &Signature) -> Result<(), Error>;
 }
 
 impl WalletSwapCoin for IncomingSwapCoin {
@@ -285,6 +290,19 @@ impl WalletSwapCoin for IncomingSwapCoin {
     fn get_pointlock_pubkey(&self) -> Option<&schnorr::PublicKey> {
         self.pointlock_pubkey.as_ref()
     }
+
+    fn recover_pointlock_secret(&mut self, adaptor_sig: &Signature) -> Result<(), Error> {
+        if let Some(sig) = self.pointlock_presig.as_ref() {
+            let mut adaptor = SecretKey::from_slice(&adaptor_sig.serialize_compact()[32..]).map_err(|_| Error::Protocol("cannout create secret key from adaptor signature"))?;
+            let mut pre_sig = SecretKey::from_slice(&sig.serialize_compact()[32..]).map_err(|_| Error::Protocol("unable to create secret key from contract pre-signature"))?;
+            pre_sig.negate_assign();
+            adaptor.add_assign(pre_sig.as_ref()).map_err(|_| Error::Protocol("invalid adaption addition"))?;
+            self.adaptor = Some(adaptor);
+            Ok(())
+        } else {
+            Err(Error::Protocol("missing contract pre-signature"))
+        }
+    }
 }
 
 impl WalletSwapCoin for OutgoingSwapCoin {
@@ -302,6 +320,19 @@ impl WalletSwapCoin for OutgoingSwapCoin {
 
     fn get_pointlock_pubkey(&self) -> Option<&schnorr::PublicKey> {
         self.pointlock_pubkey.as_ref()
+    }
+
+    fn recover_pointlock_secret(&mut self, adaptor_sig: &Signature) -> Result<(), Error> {
+        if let Some(sig) = self.pointlock_presig.as_ref() {
+            let mut adaptor = SecretKey::from_slice(&adaptor_sig.serialize_compact()[32..]).map_err(|_| Error::Protocol("cannout create secret key from adaptor signature"))?;
+            let mut pre_sig = SecretKey::from_slice(&sig.serialize_compact()[32..]).map_err(|_| Error::Protocol("unable to create secret key from contract pre-signature"))?;
+            pre_sig.negate_assign();
+            adaptor.add_assign(pre_sig.as_ref()).map_err(|_| Error::Protocol("invalid adaption addition"))?;
+            self.adaptor = Some(adaptor);
+            Ok(())
+        } else {
+            Err(Error::Protocol("missing contract pre-signature"))
+        }
     }
 }
 

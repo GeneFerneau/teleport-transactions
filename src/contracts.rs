@@ -205,16 +205,23 @@ pub fn read_locktime_from_contract(redeemscript: &Script) -> Option<u16> {
     }
 }
 
-pub fn read_hashlock_pubkey_from_contract(
+/// Recover the key-path public key from the taproot contract
+pub fn read_pointlock_pubkey_from_contract(
     redeemscript: &Script,
-) -> Result<PublicKey, bitcoin::util::key::Error> {
-    PublicKey::from_slice(&redeemscript.to_bytes()[27..60])
+) -> Result<schnorr::PublicKey, bitcoin::util::key::Error> {
+    schnorr::PublicKey::from_slice(&redeemscript.to_bytes()[1..33]).map_err(|e| bitcoin::util::key::Error::Secp256k1(e))
 }
 
 pub fn read_timelock_pubkey_from_contract(
     redeemscript: &Script,
 ) -> Result<PublicKey, bitcoin::util::key::Error> {
     PublicKey::from_slice(&redeemscript.to_bytes()[65..98])
+}
+
+pub fn read_hashlock_pubkey_from_contract(
+    redeemscript: &Script,
+) -> Result<PublicKey, bitcoin::util::key::Error> {
+    PublicKey::from_slice(&redeemscript.to_bytes()[27..59])
 }
 
 pub fn read_pubkeys_from_multisig_redeemscript(

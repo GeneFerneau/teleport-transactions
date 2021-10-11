@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tokio::io::BufReader;
@@ -30,7 +31,7 @@ use crate::contracts::{
 };
 use crate::error::Error;
 use crate::messages::{
-    ConfirmedCoinSwapTxInfo, HashPreimage, MakerToTakerMessage, NextCoinSwapTxInfo, Preimage,
+    ConfirmedCoinSwapTxInfo, HashPreimage, MakerToTakerMessage, NextCoinSwapTxInfo, Pointlock, PointlockPreSig, Preimage,
     PrivateKeyHandover, ProofOfFunding, ReceiversContractTxInfo, SenderContractTxNoncesInfo,
     SendersAndReceiversContractSigs, SignReceiversContractTx, SignSendersAndReceiversContractTxes,
     SignSendersContractTx, SwapCoinPrivateKey, TakerHello, TakerToMakerMessage,
@@ -41,7 +42,7 @@ use crate::get_bitcoin_rpc;
 
 use crate::offerbook_sync::{sync_offerbook, OfferAddress};
 use crate::wallet_sync::{
-    generate_keypair, CoreAddressLabelType, IncomingSwapCoin, OutgoingSwapCoin, Wallet,
+    generate_keypair, CoreAddressLabelType, IncomingSwapCoin, OutgoingSwapCoin, Wallet, WalletSwapCoin,
 };
 
 #[tokio::main]
@@ -1078,4 +1079,30 @@ async fn send_hash_preimage_and_get_private_keys(
 
     log::info!("<=== [{}] | Received PrivateKeyHandover", peer_port);
     Ok(maker_private_key_handover)
+}
+
+fn handle_pointlock_pre_sig(
+    wallet: Arc<RwLock<Wallet>>,
+    message: PointlockPreSig,
+) -> Result<(), Error> {
+    // TODO:
+    // - verify the pointlock pre-signature
+    // - store in the respective OutgoingSwapCoin
+    let mut wallet_ref = wallet.write().unwrap();
+    wallet_ref.update_swap_coins_list()?;
+    Ok(())
+}
+
+fn handle_pointlock(
+    wallet: Arc<RwLock<Wallet>>,
+    message: Pointlock,
+) -> Result<(), Error> {
+    let mut wallet_ref = wallet.write().unwrap();
+    wallet_ref
+        .find_outgoing_swapcoin_mut(&message.pointlock_redeemscript)
+        .ok_or(Error::Protocol("pointlock_redeemscript not found"))?
+        .recover_pointlock_secret(&message.signature)?;
+    wallet_ref.update_swap_coins_list()?;
+    println!("successfully completed coinswap");
+    Ok(())
 }

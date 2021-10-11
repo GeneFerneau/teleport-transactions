@@ -93,6 +93,19 @@ pub struct HashPreimage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct PointlockPreSig {
+    pub senders_pointlock_redeemscripts: Vec<Script>,
+    pub receivers_pointlock_redeemscripts: Vec<Script>,
+    pub signature: Signature,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Pointlock {
+    pub pointlock_redeemscript: Script,
+    pub signature: Signature,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SwapCoinPrivateKey {
     pub multisig_redeemscript: Script,
     pub key: SecretKey,
@@ -114,6 +127,8 @@ pub enum TakerToMakerMessage {
     SignReceiversContractTx(SignReceiversContractTx),
     HashPreimage(HashPreimage),
     PrivateKeyHandover(PrivateKeyHandover),
+    PointlockPreSig(PointlockPreSig),
+    Pointlock(Pointlock),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -164,4 +179,6 @@ pub enum MakerToTakerMessage {
     SignSendersAndReceiversContractTxes(SignSendersAndReceiversContractTxes),
     ReceiversContractSig(ReceiversContractSig),
     PrivateKeyHandover(PrivateKeyHandover),
+    PointlockPreSig(PointlockPreSig),
+    Pointlock(Pointlock),
 }
